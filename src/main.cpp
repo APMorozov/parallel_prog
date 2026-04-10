@@ -1,69 +1,100 @@
+#include <mpi.h>
 #include <iostream>
 #include <vector>
-#include <fstream>
 #include <random>
-#include <chrono>
-#include <omp.h>
 
 using namespace std;
 
-using Matrix = vector<vector<double>>;
+using Matrix = vector<double>;
 
-Matrix generateMatrix(int n) {
-    Matrix mat(n, vector<double>(n));
+void generateMatrix(Matrix& mat, int n) {
     random_device rd;
     mt19937 gen(rd());
     uniform_real_distribution<> dis(0.0, 10.0);
 
-    for (int i = 0; i < n; i++)
-        for (int j = 0; j < n; j++)
-            mat[i][j] = dis(gen);
-
-    return mat;
+    for (int i = 0; i < n * n; i++)
+        mat[i] = dis(gen);
 }
 
-Matrix multiplyOMP(const Matrix& A, const Matrix& B, int num_threads) {
-    int n = A.size();
-    Matrix C(n, vector<double>(n, 0));
+int main(int argc, char** argv) {
+    MPI_Init(&argc, &argv);
 
-    omp_set_num_threads(num_threads);
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-#pragma omp parallel for collapse(2)
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < n; j++) {
-            double sum = 0;
-            for (int k = 0; k < n; k++) {
-                sum += A[i][k] * B[k][j];
-            }
-            C[i][j] = sum;
-        }
+    vector<int> sizes = {200, 400, 800, 1200, 1600, 2000};
+
+    if (rank == 0) {
+        cout << "Processes: " << size << endl;
+        cout << "-----------------------------" << endl;
     }
-
-    return C;
-}
-
-int main() {
-    vector<int> sizes = {200, 400, 800, 1200, 1600, 2000, 2500, 3000, 3500, 4000};
-    vector<int> threads = {1, 2, 4, 8, 16, 20};
 
     for (int n : sizes) {
-        cout << "\nMatrix size: " << n << "x" << n << endl;
 
-        Matrix A = generateMatrix(n);
-        Matrix B = generateMatrix(n);
+        Matrix A, B(n * n), C;
 
-        for (int t : threads) {
-            auto start = chrono::high_resolution_clock::now();
+        int rows_per_proc = n / size;
+        int remainder = n % size;
 
-            Matrix C = multiplyOMP(A, B, t);
+        int local_rows = rows_per_proc + (rank < remainder ? 1 : 0);
 
-            auto end = chrono::high_resolution_clock::now();
-            chrono::duration<double> elapsed = end - start;
+        vector<int> sendcounts(size), displs(size);
 
-            cout << "Threads: " << t
-                 << " | Time: " << elapsed.count() << " sec" << endl;
+        int offset = 0;
+        for (int i = 0; i < size; i++) {
+            int rows = rows_per_proc + (i < remainder ? 1 : 0);
+            sendcounts[i] = rows * n;
+            displs[i] = offset;
+            offset += rows * n;
+        }
+
+        Matrix local_A(local_rows * n);
+        Matrix local_C(local_rows * n, 0);
+
+        if (rank == 0) {
+            A.resize(n * n);
+            generateMatrix(A, n);
+            generateMatrix(B, n);
+        }
+
+        MPI_Bcast(B.data(), n * n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+        MPI_Scatterv(A.data(), sendcounts.data(), displs.data(),
+                     MPI_DOUBLE,
+                     local_A.data(), local_rows * n,
+                     MPI_DOUBLE,
+                     0, MPI_COMM_WORLD);
+
+        MPI_Barrier(MPI_COMM_WORLD);
+        double start = MPI_Wtime();
+
+        for (int i = 0; i < local_rows; i++) {
+            for (int j = 0; j < n; j++) {
+                for (int k = 0; k < n; k++) {
+                    local_C[i * n + j] += local_A[i * n + k] * B[k * n + j];
+                }
+            }
+        }
+
+        MPI_Barrier(MPI_COMM_WORLD);
+        double end = MPI_Wtime();
+
+        if (rank == 0) {
+            C.resize(n * n);
+        }
+
+        MPI_Gatherv(local_C.data(), local_rows * n, MPI_DOUBLE,
+                    C.data(), sendcounts.data(), displs.data(),
+                    MPI_DOUBLE,
+                    0, MPI_COMM_WORLD);
+
+        if (rank == 0) {
+            cout << "Size: " << n
+                 << " | Time: " << (end - start) << " sec" << endl;
         }
     }
 
+    MPI_Finalize();
     return 0;
 }
