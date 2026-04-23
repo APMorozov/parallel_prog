@@ -1,0 +1,12 @@
+#!/bin/bash
+#SBATCH --job-name=SupermatMulMPI_1_1000
+#SBATCH --time=0:30:00
+#SBATCH --ntasks-per-node=12
+#SBATCH --partition batch
+
+module load intel/mpi5
+for procs in 1 2 4 8 16; do
+    echo "Running with $procs processes"
+    mpirun -np $procs ./lab_5_3
+    echo "----------------------------------------"
+done
